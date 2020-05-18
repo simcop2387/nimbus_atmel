@@ -29,10 +29,8 @@ struct gauge_t {
 #define I2C_LSTR(ADDR, STR) {const size_t l = sizeof(STR); write_addr(ADDR, STR, l);};
 
 void write_addr(uint8_t addr, const char *bytes, size_t length) {
-  size_t real_len;
-
   for (size_t pos = 0; pos < length; pos += 32) {
-    real_len = length > 32 ? 32 : length; // Send in 32 byte chunks
+    size_t real_len = length > 32 ? 32 : length; // Send in 32 byte chunks
   
     Wire.beginTransmission(addr);
     Wire.write(&bytes[pos], real_len);
@@ -84,7 +82,7 @@ void display_set(uint8_t disp) {
 
 void set_write_gauge(uint8_t dial, uint8_t direction, uint16_t value) {
   if (dial >= 4)
-    dial = 0x0F;
+    return;
 
   const char data[] = {(char)gauge_addr[dial], (char) (value >> 8), (char) (value & 0xFF)};
 
@@ -114,13 +112,12 @@ void check_decode_serial() {
   if (ready > 0) {
     size_t to_read = ready;
     size_t total_read = 0;
-    size_t bytes_read;
 
     while(total_read < to_read) {
       size_t read_len = to_read - total_read <= sizeof(serial_buf) - serial_end // Don't go past the end of the ring buffer
                         ? to_read - total_read // read up however many bytes we have left
                         : sizeof(serial_buf) - serial_end; // read up until we hit the end of the buffer instead
-      bytes_read = Serial.readBytes((char *) &serial_buf[serial_end], to_read);
+      size_t bytes_read = Serial.readBytes((char *) &serial_buf[serial_end], read_len);
       total_read += bytes_read; // update our position on the port
 
       serial_end = (to_read + serial_end) % sizeof(serial_buf);
@@ -149,6 +146,13 @@ void check_decode_serial() {
         }
         break;
       case SER_COM_DISP:
+        if (avail >= 43) { // command, display, data.  1 + 1 + 41
+          SER_CONSUME(); // drop the command
+          uint8_t target = SER_CONSUME();
+
+          for (uint8_t p = 0; p < 41; p++)
+            display_buffers[target][p] = SER_CONSUME();
+        }
       case SER_COM_AUDIO:
       default: // Shouldn't happen, we'll just consume a byte
         SER_CONSUME();
