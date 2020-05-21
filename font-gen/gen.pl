@@ -312,6 +312,51 @@ my $custom_chars = {
     0b11111000,
     0b00000000, # force keep this blank column
   ],
+
+
+
+
+  # Formatting meta-chars
+  31 => [ # Clear formatting
+    0b01010000,
+    0b10010000,
+    0b01011000,
+    0b00000000,
+    0b11000000,
+    0b10000000,
+    0b10000000,
+    0b00100000, # force keep this blank column
+  ],
+  30 => [ # Blink
+    0b10010000,
+    0b11010000,
+    0b11011000,
+    0b00000000,
+    0b10100000,
+    0b11000000,
+    0b10100000,
+    0b00000000, # force keep this blank column
+  ],
+  29 => [ # Inverse
+    0b11100000,
+    0b01001100,
+    0b11101010,
+    0b00000000,
+    0b10100000,
+    0b01000000,
+    0b00000000,
+    0b00010000, # force keep this blank column
+  ],
+  28 => [ # Inverse-Blink, invert instead of disappearing when blinking
+    0b11100000,
+    0b01001100,
+    0b11101010,
+    0b00000000,
+    0b10101000,
+    0b01001100,
+    0b00001100,
+    0b00010000, # force keep this blank column
+  ],
 };
 
 {
