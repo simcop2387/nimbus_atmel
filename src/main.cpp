@@ -1,12 +1,19 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <RingBuf.h>
 
 #define SER_COM_GAUGE 0x01
 #define SER_COM_DISP  0x02
 #define SER_COM_BRIGHT 0x03
 #define SER_COM_AUDIO  0x04
 // This should in theory get sent to the esp when a button is hit
-#define SER_COM_BUTTON 0x70
+#define SER_COM_BUTTON_A 0x70
+#define SER_COM_BUTTON_B 0x71
+#define SER_COM_AUDIO_DONE 0xA0
+// For when you send audio and we're currently playing it
+#define SER_COM_AUDIO_BUSY 0xA1
+
+#define SER_COM_RESET_ACK 0xFE
 // A command to flush the buffer and pretend like we never got any data
 #define SER_COM_RESET 0xFF
 
@@ -89,73 +96,72 @@ void set_write_gauge(uint8_t dial, uint8_t direction, uint16_t value) {
   write_addr(0x25, data, 3);
 }
 
-uint8_t serial_pos = 0;
-uint8_t serial_end = 0;
-uint8_t serial_buf[64] = {0};
-
-#define SER_PEEK() serial_buf[serial_pos]
-// This fails to consume a byte if we're at the end of the buffer, but will return the last byte
-inline uint8_t SER_CONSUME() {
-  uint8_t temp = serial_buf[serial_pos];
-  
-  if (serial_pos != serial_end) {
-    serial_pos = (serial_end + 1) % sizeof(serial_buf);
-  }
-
-  return temp;
-}
-// How many bytes are available
-#define SER_AVAIL() (serial_end - serial_pos >= 0 ? serial_end - serial_pos : sizeof(serial_buf) + (serial_end - serial_pos))
+RingBuf<uint8_t, 128> serial_data;
 
 void check_decode_serial() {
+  uint8_t temp;
   size_t ready = Serial.available();
   if (ready > 0) {
-    size_t to_read = ready;
-    size_t total_read = 0;
+    while(ready > 0) {
+      ready--;
 
-    while(total_read < to_read) {
-      size_t read_len = to_read - total_read <= sizeof(serial_buf) - serial_end // Don't go past the end of the ring buffer
-                        ? to_read - total_read // read up however many bytes we have left
-                        : sizeof(serial_buf) - serial_end; // read up until we hit the end of the buffer instead
-      size_t bytes_read = Serial.readBytes((char *) &serial_buf[serial_end], read_len);
-      total_read += bytes_read; // update our position on the port
-
-      serial_end = (to_read + serial_end) % sizeof(serial_buf);
+      serial_data.push(Serial.read());
     }
   }
 
-  size_t avail = SER_AVAIL();
+  uint8_t avail = serial_data.size();
   if (avail > 0) {
-    switch(SER_PEEK()) {
+    switch(serial_data[0]) {
       case SER_COM_GAUGE:
         if (avail >= 3) {
-          SER_CONSUME(); // drop the command
-          uint8_t gauge = SER_CONSUME();
-          uint8_t new_pos = SER_CONSUME();
+          serial_data.pop(temp); // drop the command
+          serial_data.pop(temp); // temp is now the target gauge
+
 
           // ignore any other gauges
-          if (gauge < 4) {
-            gauge_status[gauge].tgt_pos = new_pos;
+          if (temp < 4) {
+            serial_data.pop(gauge_status[temp].tgt_pos);
+          } else {
+            serial_data.pop(temp); // drop the position this was an invalid gauge.
           }
         }
         break;
       case SER_COM_BRIGHT:
         if (avail >= 2) {
-          SER_CONSUME(); // drop the command
-          brightness = SER_CONSUME();
+          serial_data.pop(temp); // drop the command
+          serial_data.pop(brightness);
+          // TODO analogWrite here? probably not
         }
         break;
       case SER_COM_DISP:
         if (avail >= 43) { // command, display, data.  1 + 1 + 41
-          SER_CONSUME(); // drop the command
-          uint8_t target = SER_CONSUME();
+          serial_data.pop(temp); // drop the command
+          serial_data.pop(temp); // temp is now the target display
 
           for (uint8_t p = 0; p < 41; p++)
-            display_buffers[target][p] = SER_CONSUME();
+            serial_data.pop(display_buffers[temp][p]);
         }
       case SER_COM_AUDIO:
+        if (avail >= 2) {
+          uint8_t notes = serial_data[1]; // This is the length, will never be more than 32 notes
+
+          if (avail >= 2 + notes * 2) {
+            // each note is 2 bytes, 0xL_N_VV, length note, and volume.  only 12 notes, in a single octave though.  maybe change to 4 lengths and 6 bits for four octaves?
+
+          // TODO actually store the audio
+          for (uint8_t p = 0; p < 2 + notes * 2; p++)
+            serial_data.pop(temp);
+          }
+        }
+        break;
+      case SER_COM_RESET: // flush the buffer, used to reset things
+        while (serial_data.size() > 0)
+          serial_data.pop(temp);
+        // TODO send ACK
+        Serial.write(SER_COM_RESET_ACK);
+        break;
       default: // Shouldn't happen, we'll just consume a byte
-        SER_CONSUME();
+        serial_data.pop(temp);
         break;
     }
   }
