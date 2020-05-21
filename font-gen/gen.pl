@@ -7,7 +7,7 @@ use v5.28;
 use Font::PCF;
 use Data::Dumper;
 use Data::Dumper::Compact 'ddc';
-
+use GD;
 
 my $custom_chars = {
   0 => [ # Blank base character, save for later
@@ -201,13 +201,19 @@ my $custom_chars = {
 
 {
   package MyGlyphs;
+  use Data::Dumper;
 
   sub bitmap {
-    return $custom_chars->{$$_[0]};
+    print Dumper($_[0], $custom_chars->{${$_[0]}});
+    return [map {$_ << 24} $custom_chars->{$_[0]->$*}->@*];
   }
 
   sub width {
     return 8
+  }
+
+  sub name {
+    return "CUSTOM";
   }
 }
 
@@ -224,6 +230,7 @@ sub transpose_glyph {
   my $g = shift;
 
   my @raw_bits = map {[split('', substr(sprintf("%032b", $_), 0, $g->width))]} $g->bitmap->@*;
+  ddc(\@raw_bits);
   my @new_bits;
 
   for my $row (0..$#raw_bits) {
@@ -249,7 +256,13 @@ my @widths;
 my $font = Font::PCF->open( "/usr/share/fonts/X11/misc/clR5x8.pcf.gz" );
 
 for my $char (0..127) {
-  my $g = $font->get_glyph_for_char( chr $char );
+  my $g;
+
+  if (exists($custom_chars->{$char})) {
+    $g = bless \$char, "MyGlyphs";
+  } else {
+   $g = $font->get_glyph_for_char( chr $char );
+  }
   my $glyph = transpose_glyph $g;
 
   push @bytes, $glyph->{columns}->@*;
@@ -271,3 +284,22 @@ my $total = 0;
 my $S = join ', ', map {$total += $_; sprintf "% 4d", $total} @widths;
 my $W = join ', ', @widths;
 print $template =~ s/%B%/$B/r =~ s/%W%/$W/r =~ s/%S%/$S/r;
+
+my $gd = GD::Image->new(scalar @bytes, 8);
+my $white = $gd->colorAllocate(255,255,255);
+my $black = $gd->colorAllocate(0,0,0);
+
+for my $x (0..$#bytes) {
+  my $col = $bytes[$x];
+  for my $y (0..7) {
+    my $bit = oct($col) & (2**$y) ? 1 : 0;
+    
+    if ($bit) {
+      $gd->setPixel($x, 7-$y, $black)
+    }
+  }
+}
+
+open(my $imfh, ">image.png");
+print $imfh $gd->png;
+close($imfh);
