@@ -1,17 +1,26 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <RingBuf.h>
+#include <Volume.h>
+
+Volume vol; // TODO move this to a more appropriate place
+
+// All comm commands with the highbit set should only be sent by the slave device
 
 #define SER_COM_GAUGE 0x01
 #define SER_COM_DISP  0x02
 #define SER_COM_BRIGHT 0x03
 #define SER_COM_AUDIO  0x04
+// Stop all audio playback
+#define SER_COM_AUDIO_STOP 0x05
+
 // This should in theory get sent to the esp when a button is hit
-#define SER_COM_BUTTON_A 0x70
-#define SER_COM_BUTTON_B 0x71
+#define SER_COM_BUTTON_A 0x80
+#define SER_COM_BUTTON_B 0x81
 #define SER_COM_AUDIO_DONE 0xA0
-// For when you send audio and we're currently playing it
+// For when you send audio and we're currently playing something
 #define SER_COM_AUDIO_BUSY 0xA1
+#define SER_COM_AUDIO_BAD  0xA2
 
 #define SER_COM_RESET_ACK 0xFE
 // A command to flush the buffer and pretend like we never got any data
@@ -24,7 +33,7 @@ const uint8_t display_data_addr[] = {0x3B, 0x3F, 0x3D, 0x39};
 
 const uint8_t gauge_addr[] = {0xC8, 0xE8, 0xA8, 0x88};
 
-uint8_t display_buffers[4][41];
+uint8_t display_buffers[41];
 uint8_t brightness = 255;
 
 struct gauge_t {
@@ -32,6 +41,47 @@ struct gauge_t {
   uint8_t tgt_pos;
   uint32_t last_update;
 } gauge_status[4];
+
+// each note is 2 bytes, 0bT_LL_A_F_NNNNNN_VVVVV
+
+// T - Type, 1 bit (when set, the rest is a command not a note)
+// L - Note length 2 bits (Whole, Half, Quarter, Eighth)
+// A - Attack/Fade, if set will fade the note out/in
+// N - Note, 6 bits, cover many octaves see table at top for order
+// V - Volume, starting volume, 5 bits scaled to 8bit (volume << 3 | volume >> 2), use the high bits as the low bits when scaling to get more even steps
+
+// Commands are formatted like this
+// 0b1_CCC_AAAAAA_BBBBBB
+// C - Command number
+// A - Parameter A
+// B - Parameter B
+//
+// C = 0  ?
+// C = 1  Set tempo, A = notes per minute, B = fractional notes?
+// C = 2  Set attack aggressiveness, A = how aggressive
+// C = 3  Set fade agressiveness, A = how aggressive
+// C = 4  Play sound effect, A = sound effect, B = parameter passed to effect
+// C = 5  Set buffer loop count, A = how many times to play buffer, B = 0, all buffer, else next B notes?
+// C = 6  ?
+// C = 7  ?
+union audiobuf_t {
+  struct {
+    unsigned int is_command:1;
+    unsigned int length:2; // note length
+    unsigned int attack:1; // Should we attack the note
+    unsigned int fade:1;   // Should we fade in? setting both of these causes only attack to happen
+    unsigned int note:6;   // which note to play
+    unsigned int volume:5; // Volume to play, scaled to 8bit (volume << 3 | volume >> 2)
+  } note;
+  struct {
+    unsigned int is_command:1;
+    unsigned int cmd_value:3;
+    unsigned int cmd_param_a:6;
+    unsigned int cmd_param_b:6;
+  } command;
+  struct {uint8_t high, low;} fill;
+} audiobuff[64]; // 64 commands/notes
+uint8_t audiobuff_length = 0;
 
 #define I2C_LSTR(ADDR, STR) {const size_t l = sizeof(STR); write_addr(ADDR, STR, l);};
 
@@ -84,7 +134,7 @@ void display_set(uint8_t disp) {
 
   display_set_xpos(disp, 0);
 
-  write_addr(display_data_addr[disp], (const char *) display_buffers[disp], 41);
+  write_addr(display_data_addr[disp], (const char *) display_buffers, 41);
 }
 
 void set_write_gauge(uint8_t dial, uint8_t direction, uint16_t value) {
@@ -96,7 +146,7 @@ void set_write_gauge(uint8_t dial, uint8_t direction, uint16_t value) {
   write_addr(0x25, data, 3);
 }
 
-RingBuf<uint8_t, 128> serial_data;
+RingBuf<uint8_t, 132> serial_data;
 
 void check_decode_serial() {
   uint8_t temp;
@@ -130,7 +180,7 @@ void check_decode_serial() {
         if (avail >= 2) {
           serial_data.pop(temp); // drop the command
           serial_data.pop(brightness);
-          // TODO analogWrite here? probably not
+          // TODO analogWrite here? probably not, do that next loop
         }
         break;
       case SER_COM_DISP:
@@ -139,18 +189,27 @@ void check_decode_serial() {
           serial_data.pop(temp); // temp is now the target display
 
           for (uint8_t p = 0; p < 41; p++)
-            serial_data.pop(display_buffers[temp][p]);
+            serial_data.pop(display_buffers[p]);
+
+          display_set(temp);
         }
       case SER_COM_AUDIO:
         if (avail >= 2) {
-          uint8_t notes = serial_data[1]; // This is the length, will never be more than 32 notes
+          uint8_t notes = serial_data[1]; // This is the length
 
-          if (avail >= 2 + notes * 2) {
-            // each note is 2 bytes, 0xL_N_VV, length note, and volume.  only 12 notes, in a single octave though.  maybe change to 4 lengths and 6 bits for four octaves?
-
-          // TODO actually store the audio
-          for (uint8_t p = 0; p < 2 + notes * 2; p++)
-            serial_data.pop(temp);
+          if (notes < 64 && avail >= 2 + notes * 2) {
+            serial_data.pop(temp); // Remove command
+            // TODO actually store the audio
+            for (uint8_t p = 0; p < notes; p++) {
+              serial_data.pop(audiobuff[p].fill.high);
+              serial_data.pop(audiobuff[p].fill.low); 
+            }
+            audiobuff_length = notes;
+          } else if (notes > 64) {
+            Serial.write(SER_COM_AUDIO_BAD); // Sent bad audio data, fix it
+            // Clear the bad data
+            for (uint8_t p = 0; p < 2 + notes * 2; p++)
+              serial_data.pop(temp);
           }
         }
         break;
@@ -199,21 +258,10 @@ uint8_t led_status = 0;
 
 void loop() {
   // Make some display stuff
+  check_decode_serial();
 
-  for (int d = 0; d < 4; d++) {
-    for (int x = 0; x < 41; x++) {
-      display_buffers[d][x] = x+d*41;
-    }
-    display_buffers[d][0] = disp_ctr;
-  }
-
-  if (millis() - last_update > 100) {
-    display_set(0);
-    display_set(1);
-    display_set(2);
-    display_set(3);
-    last_update = millis();
-    disp_ctr++;
+  if (vol.millis() - last_update > 100) {
+    last_update = vol.millis();
 
     led_status ^= 1;
     digitalWrite(LED_BUILTIN, led_status ? HIGH : LOW);
