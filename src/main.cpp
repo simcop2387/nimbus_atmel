@@ -28,12 +28,12 @@ Volume vol; // TODO move this to a more appropriate place
 
 const int output_pins[]={LED_BUILTIN, 16};
 
-const uint8_t display_ctl_addr[]  = {0x3A, 0x3E, 0x3C, 0x38};
-const uint8_t display_data_addr[] = {0x3B, 0x3F, 0x3D, 0x39};
+const PROGMEM uint8_t display_ctl_addr[]  = {0x3A, 0x3E, 0x3C, 0x38};
+const PROGMEM uint8_t display_data_addr[] = {0x3B, 0x3F, 0x3D, 0x39};
 
-const uint8_t gauge_addr[] = {0xC8, 0xE8, 0xA8, 0x88};
+const PROGMEM uint8_t gauge_addr[] = {0xC8, 0xE8, 0xA8, 0x88};
 
-uint8_t display_buffers[41];
+uint8_t display_buffers[4][41];
 uint8_t brightness = 255;
 
 struct gauge_t {
@@ -42,10 +42,10 @@ struct gauge_t {
   uint32_t last_update;
 } gauge_status[4];
 
-// each note is 2 bytes, 0bT_LL_A_F_NNNNNN_VVVVV
+// each note is 2 bytes, 0bT_LLD_A_NNNNNN_VVVVV
 
 // T - Type, 1 bit (when set, the rest is a command not a note)
-// L - Note length 2 bits (Whole, Half, Quarter, Eighth)
+// L - Note length 2 bits (Whole, Half, Quarter, Eighth) + dotted bit
 // A - Attack/Fade, if set will fade the note out/in
 // N - Note, 6 bits, cover many octaves see table at top for order
 // V - Volume, starting volume, 5 bits scaled to 8bit (volume << 3 | volume >> 2), use the high bits as the low bits when scaling to get more even steps
@@ -56,20 +56,19 @@ struct gauge_t {
 // A - Parameter A
 // B - Parameter B
 //
-// C = 0  ?
+// C = 0  ? Create Chorus? A = length, B = loops?
 // C = 1  Set tempo, A = notes per minute, B = fractional notes?
-// C = 2  Set attack aggressiveness, A = how aggressive
-// C = 3  Set fade agressiveness, A = how aggressive
+// C = 2  Set attack aggressiveness, A = attack, B = fade?
+// C = 3  ?
 // C = 4  Play sound effect, A = sound effect, B = parameter passed to effect
 // C = 5  Set buffer loop count, A = how many times to play buffer, B = 0, all buffer, else next B notes?
 // C = 6  ?
-// C = 7  ?
+// C = 7  ? Play chorus
 union audiobuf_t {
   struct {
     unsigned int is_command:1;
-    unsigned int length:2; // note length
+    unsigned int length:3; // note length
     unsigned int attack:1; // Should we attack the note
-    unsigned int fade:1;   // Should we fade in? setting both of these causes only attack to happen
     unsigned int note:6;   // which note to play
     unsigned int volume:5; // Volume to play, scaled to 8bit (volume << 3 | volume >> 2)
   } note;
@@ -82,6 +81,8 @@ union audiobuf_t {
   struct {uint8_t high, low;} fill;
 } audiobuff[64]; // 64 commands/notes
 uint8_t audiobuff_length = 0;
+uint8_t audiobuff_loop_size = 0;
+uint8_t audiobuff_loop_count = 0;
 
 #define I2C_LSTR(ADDR, STR) {const size_t l = sizeof(STR); write_addr(ADDR, STR, l);};
 
@@ -134,7 +135,7 @@ void display_set(uint8_t disp) {
 
   display_set_xpos(disp, 0);
 
-  write_addr(display_data_addr[disp], (const char *) display_buffers, 41);
+  write_addr(display_data_addr[disp], (const char *) display_buffers[4], 41);
 }
 
 void set_write_gauge(uint8_t dial, uint8_t direction, uint16_t value) {
@@ -189,9 +190,7 @@ void check_decode_serial() {
           serial_data.pop(temp); // temp is now the target display
 
           for (uint8_t p = 0; p < 41; p++)
-            serial_data.pop(display_buffers[p]);
-
-          display_set(temp);
+            serial_data.pop(display_buffers[temp][p]);
         }
       case SER_COM_AUDIO:
         if (avail >= 2) {
@@ -255,6 +254,10 @@ void setup() {
 
 uint32_t last_update = 0;
 uint8_t led_status = 0;
+
+void sound_state_machine() {
+
+}
 
 void loop() {
   // Make some display stuff
