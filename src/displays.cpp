@@ -83,6 +83,9 @@ void display_state_machine() {
   if (updating == 0 && (vol.millis() - last_update > 100)) {
     last_update = vol.millis();
     updating = 1;
+
+    // Do the analog write to the brightness pin
+    //analogWrite()
   }
 
   // Only update one screen at a time, so we can better handle latency for sound generation
